@@ -30,19 +30,21 @@ ROUTINE receive_github_webhook(request) -> HTTP response
         RETURN HTTP 400 {error: "Missing X-GitHub-Delivery or X-GitHub-Event"}
     END IF
 
-    # Insert raw evidence BEFORE parsing or normalization. The database enforces the
-    # primary-key/unique constraint on webhook_deliveries.delivery_id.
+    # Best-effort extraction of the top-level action never blocks raw evidence storage.
+    parsed_payload = best_effort_parse_json(raw_body)
+    action = parsed_payload.action IF action is a string ELSE explicit_null
+
+    # Insert byte-verbatim raw evidence before normalization. The database enforces
+    # the primary-key/unique constraint on webhook_deliveries.delivery_id.
     insert_result = DATABASE.INSERT webhook_deliveries {
         delivery_id: delivery_id,
         event_name: event_name,
-        action: explicit_null,
-        headers_json: serialize_all_headers(request.headers),
-        payload_json: raw_body,
+        action: action,
+        headers_json: serialize_headers_excluding(request.headers, ["authorization", "cookie"]),
+        payload_text: raw_body,
         received_at: received_at,
-        # The model permits only processed/ignored/failed. Until atomic processing
-        # succeeds, failed is the conservative visible outcome after a crash.
-        processing_status: "failed",
-        processing_error: "Raw delivery stored; processing not yet completed"
+        processing_status: "received",
+        processing_error: explicit_null
     } ON UNIQUE CONFLICT delivery_id RETURN "duplicate"
 
     IF insert_result == "duplicate"

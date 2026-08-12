@@ -9,6 +9,7 @@
     "start": "next start",
     "typecheck": "tsc --noEmit",
     "migrate": "tsx src/db/migrate.ts",
+    "test": "vitest run",
     "commitlint": "commitlint --from=HEAD~1 --to=HEAD"
   },
   "dependencies": {
@@ -36,6 +37,7 @@
     "@types/react": "^19.1.10",
     "@types/react-dom": "^19.1.7",
     "tsx": "^4.20.3",
-    "typescript": "^5.9.2"
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
   }
 }
