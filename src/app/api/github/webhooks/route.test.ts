@@ -2,33 +2,58 @@ import { createHmac } from "node:crypto";
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { query } from "@/db/client";
+import { query, withTransaction } from "@/db/client";
 import { env } from "@/lib/env";
 
 import { POST } from "./route";
 
-vi.mock("@/db/client", () => ({ query: vi.fn() }));
+vi.mock("@/db/client", () => ({ query: vi.fn(), withTransaction: vi.fn() }));
 
 const secret = "route-test-secret";
-const rawBody = '{\n  "action": "edited",\n  "value": 1\n}\n';
+const targetProject = "PVT_target";
+const fieldValue = {
+  field_node_id: "PVTSSF_lADOBH2n9s4Aje1Izgb1kEs",
+  field_type: "single_select",
+  field_name: "Status",
+  project_number: 18,
+  from: { id: "f75ad846", name: "Todo", color: "GREEN", description: "..." },
+  to: { id: "47fc9ee4", name: "In Progress", color: "YELLOW", description: "..." },
+};
+const basePayload = {
+  action: "edited",
+  installation: { id: 12345 },
+  organization: { login: "example-org" },
+  projects_v2_item: {
+    project_node_id: targetProject,
+    id: "PVTI_item",
+    content_type: "Issue",
+    content_node_id: "I_issue",
+  },
+  changes: { field_value: fieldValue },
+  sender: { login: "octocat" },
+};
+
 const mockedQuery = vi.mocked(query);
+const mockedWithTransaction = vi.mocked(withTransaction);
+const client = { query: vi.fn() };
 
 function signature(body: string): string {
   return `sha256=${createHmac("sha256", secret).update(body).digest("hex")}`;
 }
 
 function request(
+  payload: unknown = basePayload,
   overrides: Partial<Record<"signature" | "delivery" | "event", string | null>> = {},
 ): Request {
+  const body = typeof payload === "string" ? payload : JSON.stringify(payload);
   const headers = new Headers({
     "content-type": "application/json",
-    "x-hub-signature-256": signature(rawBody),
+    "x-hub-signature-256": signature(body),
     "x-github-delivery": "delivery-123",
     "x-github-event": "projects_v2_item",
     authorization: "Bearer must-not-be-stored",
     cookie: "session=must-not-be-stored",
   });
-
   const names = {
     signature: "x-hub-signature-256",
     delivery: "x-github-delivery",
@@ -41,79 +66,135 @@ function request(
     else if (value !== undefined) headers.set(name, value);
   }
 
-  return new Request("http://localhost/api/github/webhooks", {
-    method: "POST",
-    headers,
-    body: rawBody,
-  });
+  return new Request("http://localhost/api/github/webhooks", { method: "POST", headers, body });
+}
+
+function storedDelivery(): void {
+  mockedQuery.mockResolvedValueOnce({ rows: [{ delivery_id: "delivery-123" }], rowCount: 1 } as never);
 }
 
 describe("POST /api/github/webhooks", () => {
   beforeEach(() => {
+    vi.clearAllMocks();
     env.GITHUB_WEBHOOK_SECRET = secret;
+    env.GITHUB_TARGET_PROJECT_NODE_ID = targetProject;
+    mockedWithTransaction.mockImplementation(async (operation) => operation(client as never));
+    client.query.mockResolvedValue({ rows: [], rowCount: 1 });
   });
 
-  it("stores a valid signed delivery with the exact raw body", async () => {
-    mockedQuery.mockResolvedValueOnce({
-      rows: [{ delivery_id: "delivery-123" }],
-      rowCount: 1,
-    } as never);
+  it("atomically persists a target single-select edit and marks it processed", async () => {
+    storedDelivery();
+
+    const response = await POST(request());
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({ delivery_id: "delivery-123", status: "processed" });
+    expect(body.event_id).toMatch(/^[0-9a-f-]{36}$/);
+    const deliveryValues = mockedQuery.mock.calls[0][1];
+    expect(deliveryValues?.[4]).toBe(JSON.stringify(basePayload));
+    expect(deliveryValues?.[3]).toMatchObject({
+      "x-github-delivery": "delivery-123",
+      "x-github-event": "projects_v2_item",
+    });
+    expect(deliveryValues?.[3]).not.toHaveProperty("authorization");
+    expect(deliveryValues?.[3]).not.toHaveProperty("cookie");
+    expect(mockedWithTransaction).toHaveBeenCalledOnce();
+    expect(client.query).toHaveBeenCalledTimes(3);
+    expect(client.query.mock.calls[0][0]).toContain("INSERT INTO audit_events");
+    expect(client.query.mock.calls[0][1]?.[13]).toBe(
+      '{"option_id":"f75ad846","label":"Todo"}',
+    );
+    expect(client.query.mock.calls[0][1]?.[14]).toBe(
+      '{"option_id":"47fc9ee4","label":"In Progress"}',
+    );
+    expect(client.query.mock.calls[1][0]).toContain("INSERT INTO current_values");
+    expect(client.query.mock.calls[1][1]?.[2]).toBe(
+      '{"option_id":"47fc9ee4","label":"In Progress"}',
+    );
+    expect(client.query.mock.calls[2][0]).toContain("processing_status = 'processed'");
+  });
+
+  it("ignores a different project without processing", async () => {
+    storedDelivery();
+    mockedQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 } as never);
+    const payload = {
+      ...basePayload,
+      projects_v2_item: { ...basePayload.projects_v2_item, project_node_id: "PVT_other" },
+    };
+
+    const response = await POST(request(payload));
+
+    await expect(response.json()).resolves.toEqual({ delivery_id: "delivery-123", status: "ignored" });
+    expect(mockedQuery.mock.calls[1][0]).toContain("processing_status = $2");
+    expect(mockedQuery.mock.calls[1][1]).toEqual(["delivery-123", "ignored", null]);
+    expect(client.query).not.toHaveBeenCalled();
+    expect(mockedWithTransaction).not.toHaveBeenCalled();
+  });
+
+  it("ignores a non-edited action", async () => {
+    storedDelivery();
+    mockedQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 } as never);
+
+    const response = await POST(request({ ...basePayload, action: "created" }));
+
+    await expect(response.json()).resolves.toMatchObject({ status: "ignored" });
+    expect(mockedWithTransaction).not.toHaveBeenCalled();
+  });
+
+  it("fails an unsupported field type while retaining the delivery", async () => {
+    storedDelivery();
+    mockedQuery.mockResolvedValueOnce({ rows: [], rowCount: 1 } as never);
+    const payload = { ...basePayload, changes: { field_value: { ...fieldValue, field_type: "text" } } };
+
+    const response = await POST(request(payload));
+
+    await expect(response.json()).resolves.toEqual({ delivery_id: "delivery-123", status: "failed" });
+    expect(mockedQuery.mock.calls[1][1]).toEqual([
+      "delivery-123",
+      "failed",
+      "field type text not yet supported",
+    ]);
+    expect(client.query).not.toHaveBeenCalled();
+    expect(mockedWithTransaction).not.toHaveBeenCalled();
+  });
+
+  it("returns duplicate without processing a redelivery", async () => {
+    mockedQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 } as never);
 
     const response = await POST(request());
 
-    expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({
-      delivery_id: "delivery-123",
-      status: "received",
-    });
+    await expect(response.json()).resolves.toEqual({ delivery_id: "delivery-123", duplicate: true });
     expect(mockedQuery).toHaveBeenCalledOnce();
-    const [sql, values] = mockedQuery.mock.calls[0];
-    expect(sql).toContain("payload_text");
-    expect(sql).toContain("'received'");
-    expect(values?.[4]).toBe(rawBody);
-    expect(values?.[2]).toBe("edited");
-    expect(values?.[3]).toMatchObject({
-      "x-github-delivery": "delivery-123",
-      "x-github-event": "projects_v2_item",
-      "x-hub-signature-256": signature(rawBody),
-    });
-    expect(values?.[3]).not.toHaveProperty("authorization");
-    expect(values?.[3]).not.toHaveProperty("cookie");
+    expect(mockedWithTransaction).not.toHaveBeenCalled();
   });
 
-  it("reports a repeated delivery as a duplicate without creating another row", async () => {
-    mockedQuery
-      .mockResolvedValueOnce({ rows: [{ delivery_id: "delivery-123" }], rowCount: 1 } as never)
-      .mockResolvedValueOnce({ rows: [], rowCount: 0 } as never);
+  it("binds SQL null for cleared audit and current values", async () => {
+    storedDelivery();
+    const payload = {
+      ...basePayload,
+      changes: { field_value: { ...fieldValue, to: null } },
+    };
 
-    expect((await POST(request())).status).toBe(200);
-    const duplicate = await POST(request());
+    const response = await POST(request(payload));
 
-    expect(duplicate.status).toBe(200);
-    await expect(duplicate.json()).resolves.toEqual({
-      delivery_id: "delivery-123",
-      duplicate: true,
-    });
-    expect(mockedQuery).toHaveBeenCalledTimes(2);
-    expect(mockedQuery.mock.calls[1][0]).toContain("ON CONFLICT (delivery_id) DO NOTHING");
+    await expect(response.json()).resolves.toMatchObject({ status: "processed" });
+    expect(client.query.mock.calls[0][0]).toContain("INSERT INTO audit_events");
+    expect(client.query.mock.calls[0][1]?.[14]).toBeNull();
+    expect(client.query.mock.calls[1][0]).toContain("INSERT INTO current_values");
+    expect(client.query.mock.calls[1][1]?.[2]).toBeNull();
   });
 
-  it("rejects an invalid signature without writing to the database", async () => {
-    const response = await POST(request({ signature: "sha256=bad" }));
+  it("rejects an invalid signature with zero writes", async () => {
+    const response = await POST(request(basePayload, { signature: "sha256=bad" }));
 
     expect(response.status).toBe(401);
     expect(mockedQuery).not.toHaveBeenCalled();
+    expect(mockedWithTransaction).not.toHaveBeenCalled();
   });
 
-  it("rejects a missing signature without writing to the database", async () => {
-    const response = await POST(request({ signature: null }));
-
-    expect(response.status).toBe(401);
-    expect(mockedQuery).not.toHaveBeenCalled();
-  });
-
-  it("rejects a missing delivery ID after verification without writing", async () => {
-    const response = await POST(request({ delivery: null }));
+  it("rejects missing delivery headers after verification with zero writes", async () => {
+    const response = await POST(request(basePayload, { delivery: null }));
 
     expect(response.status).toBe(400);
     expect(mockedQuery).not.toHaveBeenCalled();
