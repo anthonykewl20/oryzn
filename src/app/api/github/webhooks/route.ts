@@ -5,6 +5,7 @@ import { query, withTransaction } from "@/db/client";
 import { env } from "@/lib/env";
 import { normalizeFieldValue } from "@/lib/github/normalize";
 import { verifyGitHubSignature } from "@/lib/github/signature";
+import { toJsonb } from "@/lib/json";
 
 export const runtime = "nodejs";
 
@@ -209,7 +210,12 @@ export async function POST(request: Request): Promise<Response> {
           value_json = EXCLUDED.value_json,
           observed_at = EXCLUDED.observed_at,
           source = EXCLUDED.source`,
-        [projectItemNodeId, normalized.field_node_id, normalized.values.current_value, receivedAt],
+        [
+          projectItemNodeId,
+          normalized.field_node_id,
+          toJsonb(normalized.values.current_value),
+          receivedAt,
+        ],
       );
       await client.query(
         `UPDATE webhook_deliveries

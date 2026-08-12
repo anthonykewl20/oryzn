@@ -2,14 +2,12 @@ import { createHmac } from "node:crypto";
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { insertAuditEvent } from "@/db/audit-events";
 import { query, withTransaction } from "@/db/client";
 import { env } from "@/lib/env";
 
 import { POST } from "./route";
 
 vi.mock("@/db/client", () => ({ query: vi.fn(), withTransaction: vi.fn() }));
-vi.mock("@/db/audit-events", () => ({ insertAuditEvent: vi.fn() }));
 
 const secret = "route-test-secret";
 const targetProject = "PVT_target";
@@ -37,7 +35,6 @@ const basePayload = {
 
 const mockedQuery = vi.mocked(query);
 const mockedWithTransaction = vi.mocked(withTransaction);
-const mockedInsertAuditEvent = vi.mocked(insertAuditEvent);
 const client = { query: vi.fn() };
 
 function signature(body: string): string {
@@ -82,7 +79,6 @@ describe("POST /api/github/webhooks", () => {
     env.GITHUB_WEBHOOK_SECRET = secret;
     env.GITHUB_TARGET_PROJECT_NODE_ID = targetProject;
     mockedWithTransaction.mockImplementation(async (operation) => operation(client as never));
-    mockedInsertAuditEvent.mockResolvedValue(undefined);
     client.query.mockResolvedValue({ rows: [], rowCount: 1 });
   });
 
@@ -104,35 +100,19 @@ describe("POST /api/github/webhooks", () => {
     expect(deliveryValues?.[3]).not.toHaveProperty("authorization");
     expect(deliveryValues?.[3]).not.toHaveProperty("cookie");
     expect(mockedWithTransaction).toHaveBeenCalledOnce();
-    expect(mockedInsertAuditEvent).toHaveBeenCalledOnce();
-    expect(mockedInsertAuditEvent.mock.calls[0][0]).toBe(client);
-    expect(mockedInsertAuditEvent.mock.calls[0][1]).toMatchObject({
-      event_id: body.event_id,
-      delivery_id: "delivery-123",
-      installation_id: "12345",
-      organization_login: "example-org",
-      project_node_id: targetProject,
-      project_item_node_id: "PVTI_item",
-      content_type: "Issue",
-      content_node_id: "I_issue",
-      content_title: null,
-      content_url: null,
-      field_node_id: fieldValue.field_node_id,
-      field_name: "Status",
-      field_type: "single_select",
-      previous_value: { option_id: "f75ad846", label: "Todo" },
-      current_value: { option_id: "47fc9ee4", label: "In Progress" },
-      actor_login: "octocat",
-      occurred_at: null,
-      source: "github_webhook",
-    });
-    expect(client.query).toHaveBeenCalledTimes(2);
-    expect(client.query.mock.calls[0][0]).toContain("INSERT INTO current_values");
-    expect(client.query.mock.calls[0][1]?.[2]).toEqual({
-      option_id: "47fc9ee4",
-      label: "In Progress",
-    });
-    expect(client.query.mock.calls[1][0]).toContain("processing_status = 'processed'");
+    expect(client.query).toHaveBeenCalledTimes(3);
+    expect(client.query.mock.calls[0][0]).toContain("INSERT INTO audit_events");
+    expect(client.query.mock.calls[0][1]?.[13]).toBe(
+      '{"option_id":"f75ad846","label":"Todo"}',
+    );
+    expect(client.query.mock.calls[0][1]?.[14]).toBe(
+      '{"option_id":"47fc9ee4","label":"In Progress"}',
+    );
+    expect(client.query.mock.calls[1][0]).toContain("INSERT INTO current_values");
+    expect(client.query.mock.calls[1][1]?.[2]).toBe(
+      '{"option_id":"47fc9ee4","label":"In Progress"}',
+    );
+    expect(client.query.mock.calls[2][0]).toContain("processing_status = 'processed'");
   });
 
   it("ignores a different project without processing", async () => {
@@ -148,7 +128,7 @@ describe("POST /api/github/webhooks", () => {
     await expect(response.json()).resolves.toEqual({ delivery_id: "delivery-123", status: "ignored" });
     expect(mockedQuery.mock.calls[1][0]).toContain("processing_status = $2");
     expect(mockedQuery.mock.calls[1][1]).toEqual(["delivery-123", "ignored", null]);
-    expect(mockedInsertAuditEvent).not.toHaveBeenCalled();
+    expect(client.query).not.toHaveBeenCalled();
     expect(mockedWithTransaction).not.toHaveBeenCalled();
   });
 
@@ -175,7 +155,7 @@ describe("POST /api/github/webhooks", () => {
       "failed",
       "field type text not yet supported",
     ]);
-    expect(mockedInsertAuditEvent).not.toHaveBeenCalled();
+    expect(client.query).not.toHaveBeenCalled();
     expect(mockedWithTransaction).not.toHaveBeenCalled();
   });
 
@@ -187,6 +167,22 @@ describe("POST /api/github/webhooks", () => {
     await expect(response.json()).resolves.toEqual({ delivery_id: "delivery-123", duplicate: true });
     expect(mockedQuery).toHaveBeenCalledOnce();
     expect(mockedWithTransaction).not.toHaveBeenCalled();
+  });
+
+  it("binds SQL null for cleared audit and current values", async () => {
+    storedDelivery();
+    const payload = {
+      ...basePayload,
+      changes: { field_value: { ...fieldValue, to: null } },
+    };
+
+    const response = await POST(request(payload));
+
+    await expect(response.json()).resolves.toMatchObject({ status: "processed" });
+    expect(client.query.mock.calls[0][0]).toContain("INSERT INTO audit_events");
+    expect(client.query.mock.calls[0][1]?.[14]).toBeNull();
+    expect(client.query.mock.calls[1][0]).toContain("INSERT INTO current_values");
+    expect(client.query.mock.calls[1][1]?.[2]).toBeNull();
   });
 
   it("rejects an invalid signature with zero writes", async () => {

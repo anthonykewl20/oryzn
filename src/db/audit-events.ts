@@ -1,6 +1,8 @@
 // audit_events is append-only. This module exposes INSERT and SELECT only.
 import type { PoolClient } from "pg";
 
+import { toJsonb } from "@/lib/json";
+
 import { query } from "./client";
 
 export interface AuditEvent {
@@ -49,8 +51,8 @@ export async function insertAuditEvent(
 ): Promise<void> {
   const persistedEvent = {
     ...event,
-    previous_value_json: event.previous_value,
-    current_value_json: event.current_value,
+    previous_value_json: toJsonb(event.previous_value),
+    current_value_json: toJsonb(event.current_value),
   };
   const values = columns.map((column) => persistedEvent[column]);
   const placeholders = columns.map((_, index) => `$${index + 1}`).join(", ");
