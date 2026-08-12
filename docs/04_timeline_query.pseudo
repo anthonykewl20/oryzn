@@ -1,0 +1,124 @@
+# Read-only audit timeline
+
+CONSTANT PAGE_ROUTE = "GET /events"
+CONSTANT API_ROUTE = "GET /api/events"
+CONSTANT PAGE_SIZE = 50
+
+TYPE EventFilters = {
+    item_search,
+    field,
+    actor,
+    date_from,
+    date_to,
+    page
+}
+
+ROUTINE parse_event_filters(request) -> EventFilters
+    RETURN validated values from query parameters:
+        free-text item search,
+        field,
+        actor,
+        date range,
+        page defaulting to 1
+END ROUTINE
+
+ROUTINE query_events(filters: EventFilters) -> PaginatedEvents
+    RETURN DATABASE.SELECT audit_events
+        LEFT JOIN project_items
+            ON project_items.item_node_id = audit_events.project_item_node_id
+        LEFT JOIN project_fields
+            ON project_fields.field_node_id = audit_events.field_node_id
+        WHERE project_items.title matches filters.item_search when supplied
+          AND audit_events.field_node_id or project_fields.name matches filters.field when supplied
+          AND audit_events.actor_login = filters.actor when supplied
+          AND audit_events.occurred_at is within filters.date_from and filters.date_to when supplied
+        ORDER BY audit_events.occurred_at DESC,
+                 audit_events.received_at DESC,
+                 audit_events.created_at DESC
+        LIMIT PAGE_SIZE
+        OFFSET (filters.page - 1) * PAGE_SIZE
+    # SELECT only: audit_events is append-only; no update/delete route is exposed.
+END ROUTINE
+
+ROUTINE GET_api_events(request) -> HTTP response
+    REQUIRE prototype_admin_password(request, ENV.PROTOTYPE_ADMIN_PASSWORD)
+    filters = parse_event_filters(request)
+    page = query_events(filters)
+    failures = DATABASE.SELECT webhook_deliveries
+        WHERE processing_status = "failed"
+    # Processing failures remain visible and link to the protected debugger.
+    RETURN HTTP 200 JSON {
+        events: page.rows,
+        page: filters.page,
+        page_size: PAGE_SIZE,
+        has_more: page.has_more,
+        processing_failures: debugger_links(failures, "GET /internal/deliveries/:id")
+    }
+END ROUTINE
+
+ROUTINE GET_events(request) -> server-rendered HTML
+    # Timeline access is prototype-admin gated as elaborated by flowchart 5.
+    REQUIRE prototype_admin_password(request, ENV.PROTOTYPE_ADMIN_PASSWORD)
+    filters = parse_event_filters(request)
+    page = query_events(filters)
+
+    project = DATABASE.SELECT tracked_projects
+        WHERE project_node_id = ENV.TARGET_PROJECT_NODE_ID
+    installation = DATABASE.SELECT github_installations
+        WHERE installation_id = project.installation_id
+    last_successful_reconciliation = DATABASE.SELECT reconciliation_runs
+        WHERE completed_at IS NOT NULL
+        ORDER BY completed_at DESC LIMIT 1
+    processing_error_count = DATABASE.COUNT webhook_deliveries
+        WHERE processing_status = "failed"
+
+    RENDER HEADER {
+        organization_login: installation.organization_login,
+        project_title: project.title,
+        tracking_started_at: project.tracking_started_at,
+        last_successful_reconciliation: last_successful_reconciliation.completed_at,
+        current_mismatch_count: last_successful_reconciliation.mismatch_count,
+        processing_error_count: processing_error_count
+    }
+    RENDER FILTERS filters
+
+    IF page.rows IS empty
+        RENDER "No changes captured since tracking began."
+    ELSE
+        FOR EACH event IN page.rows
+            RENDER EVENT ROW {
+                timestamp: event.occurred_at,
+                actor_login: escape(event.actor_login),
+                item_title: escape(event.project_items.title or event.content_title),
+                field_name: escape(event.project_fields.name or event.field_name),
+                previous_value: render_value(event.previous_value_json, event.field_type, event.delivery_id),
+                direction_arrow: "→",
+                new_value: render_value(event.current_value_json, event.field_type, event.delivery_id),
+                github_item_link: safe_url(event.project_items.url or event.content_url)
+            }
+        END FOR
+    END IF
+
+    RENDER processing_error_count WITH links to protected "GET /internal/deliveries/:id"
+    RENDER pagination with 50 events per page
+    CONFIGURE browser polling of GET /api/events every 5 to 10 seconds
+    # Deliberately no WebSockets and no controls that mutate GitHub or audit_events.
+END ROUTINE
+
+ROUTINE render_value(value_json, field_type, delivery_id) -> visible text or link
+    IF value_json IS explicit_null OR value_json indicates cleared/empty
+        RETURN visible text "Cleared"
+    ELSE IF value_json indicates unknown OR field_type is unsupported
+        RETURN visible link "Unsupported value" TO "GET /internal/deliveries/" + delivery_id
+            requiring prototype admin password from env
+    ELSE IF field_type IN ["single_select", "iteration"]
+        RETURN escape(value_json.label)
+    ELSE IF field_type == "date"
+        RETURN ISO_date(value_json.date)
+    ELSE IF field_type IN ["text", "number"]
+        RETURN escape(plain_text_value(value_json))
+    ELSE
+        RETURN visible link "Unsupported value" TO "GET /internal/deliveries/" + delivery_id
+            requiring prototype admin password from env
+    END IF
+END ROUTINE

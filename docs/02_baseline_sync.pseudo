@@ -1,0 +1,93 @@
+# Initial Project baseline sync
+
+CONSTANT ROUTE = "POST /internal/baseline-sync"
+
+ROUTINE baseline_sync(request) -> HTTP response
+    REQUIRE prototype_admin_password(request, ENV.PROTOTYPE_ADMIN_PASSWORD)
+    # Protected operation; reject before obtaining credentials when unauthorized.
+
+    installation = DATABASE.SELECT github_installations
+        WHERE installation_id = ENV.INSTALLATION_ID
+    token = github_app_installation_token(installation.installation_id)
+    # Keep the token only for this read and let it expire naturally. Never log it.
+
+    ASSERT github_app_permission("organization Projects") == "read"
+    project_snapshot = GITHUB_GRAPHQL.READ_PROJECT_V2(
+        token,
+        ENV.TARGET_PROJECT_NODE_ID,
+        include: [fields, items, current_field_values]
+    )
+    # Read-only boundary: no GitHub mutation exists in this prototype.
+
+    observed_at = current_time()
+    DATABASE.BEGIN TRANSACTION
+    TRY
+        DATABASE.UPSERT tracked_projects {
+            project_node_id: project_snapshot.project_node_id,
+            installation_id: installation.installation_id,
+            title: project_snapshot.title,
+            url: project_snapshot.url,
+            tracking_started_at: preserve_existing_or(observed_at),
+            last_synced_at: preserve_existing()
+        } ON project_node_id
+
+        FOR EACH field IN project_snapshot.fields
+            DATABASE.UPSERT project_fields {
+                field_node_id: field.field_node_id,
+                project_node_id: project_snapshot.project_node_id,
+                name: field.name,
+                type: field.type,
+                option_metadata_json: field.option_metadata
+            } ON field_node_id
+        END FOR
+
+        FOR EACH item IN project_snapshot.items
+            DATABASE.UPSERT project_items {
+                item_node_id: item.item_node_id,
+                project_node_id: project_snapshot.project_node_id,
+                content_node_id: item.content_node_id,
+                content_type: item.content_type,
+                title: item.title,
+                url: item.url
+            } ON item_node_id
+
+            FOR EACH field_value IN item.current_field_values
+                normalized = 05_value_normalization.normalize(
+                    explicit_null,
+                    field_value.raw_value,
+                    field_value.field_type,
+                    field_value.option_metadata
+                )
+                IF normalized.outcome == "unsupported"
+                    RAISE "Baseline contains unsupported value for item " + item.item_node_id +
+                          ", field " + field_value.field_node_id + ": " + normalized.error
+                END IF
+
+                DATABASE.UPSERT current_values {
+                    item_node_id: item.item_node_id,
+                    field_node_id: field_value.field_node_id,
+                    value_json: normalized.current_value,
+                    observed_at: observed_at,
+                    source: "baseline_sync"
+                } ON UNIQUE (item_node_id, field_node_id)
+            END FOR
+        END FOR
+
+        DATABASE.UPDATE tracked_projects
+            SET last_synced_at = observed_at
+            WHERE project_node_id = project_snapshot.project_node_id
+
+        # CRITICAL: baseline state writes ONLY dictionaries and current_values.
+        # NEVER INSERT audit_events; a snapshot is not proof of a historical change.
+        DATABASE.COMMIT TRANSACTION
+    CATCH error
+        DATABASE.ROLLBACK TRANSACTION
+        RETURN HTTP 500 {error: human_message(error), kind: "baseline snapshot, not historical events"}
+    END TRY
+
+    RETURN HTTP 200 {
+        project_node_id: project_snapshot.project_node_id,
+        observed_at: observed_at,
+        kind: "baseline snapshot, not historical events"
+    }
+END ROUTINE

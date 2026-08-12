@@ -1,0 +1,105 @@
+# Current-state reconciliation
+
+CONSTANT ROUTE = "POST /internal/reconcile"
+
+ROUTINE reconcile(request) -> HTTP response
+    REQUIRE prototype_admin_password(request, ENV.PROTOTYPE_ADMIN_PASSWORD)
+    started_at = current_time()
+
+    installation = DATABASE.SELECT github_installations
+        WHERE installation_id = ENV.INSTALLATION_ID
+    token = github_app_installation_token(installation.installation_id)
+    # Installation token is used only for this Projects:read query and may expire.
+    ASSERT github_app_permission("organization Projects") == "read"
+    github_state = GITHUB_GRAPHQL.READ_PROJECT_V2(
+        token,
+        ENV.TARGET_PROJECT_NODE_ID,
+        include: [fields, items, current_field_values]
+    )
+
+    github_values = MAP keyed by (item_node_id, field_node_id)
+    github_value_keys = SET of (item_node_id, field_node_id)
+    details_json = []
+    checked_value_count = 0
+
+    FOR EACH item IN github_state.items
+        FOR EACH field IN github_state.fields
+            raw_value = lookup_field_value_or_explicit_empty(item, field.field_node_id)
+            result = 05_value_normalization.normalize(
+                explicit_null, raw_value, field.type, field.option_metadata
+            )
+            checked_value_count = checked_value_count + 1
+            key = (item.item_node_id, field.field_node_id)
+            github_value_keys.ADD(key)
+
+            IF result.outcome == "unsupported"
+                details_json.APPEND({
+                    mismatch_type: "changed",
+                    item_node_id: item.item_node_id,
+                    field_node_id: field.field_node_id,
+                    stored_value: DATABASE.current_values.value_json_or_explicit_null(
+                        item.item_node_id, field.field_node_id),
+                    github_value: {unknown: true},
+                    error: result.error
+                })
+                CONTINUE
+            END IF
+
+            github_values[key] = result.current_value
+            stored = DATABASE.SELECT current_values WHERE
+                item_node_id = item.item_node_id AND field_node_id = field.field_node_id
+
+            IF stored IS missing
+                details_json.APPEND({
+                    mismatch_type: "missing",
+                    item_node_id: item.item_node_id,
+                    field_node_id: field.field_node_id,
+                    stored_value: explicit_null,
+                    github_value: result.current_value
+                })
+            ELSE IF NOT canonical_json_equal(stored.value_json, result.current_value)
+                details_json.APPEND({
+                    mismatch_type: "changed",
+                    item_node_id: item.item_node_id,
+                    field_node_id: field.field_node_id,
+                    stored_value: stored.value_json,
+                    github_value: result.current_value
+                })
+            END IF
+        END FOR
+    END FOR
+
+    FOR EACH stored IN DATABASE.SELECT current_values JOIN project_items
+        WHERE project_items.project_node_id = ENV.TARGET_PROJECT_NODE_ID
+        key = (stored.item_node_id, stored.field_node_id)
+        IF key NOT IN github_value_keys
+            details_json.APPEND({
+                mismatch_type: "unexpected",
+                item_node_id: stored.item_node_id,
+                field_node_id: stored.field_node_id,
+                stored_value: stored.value_json,
+                github_value: explicit_null
+            })
+        END IF
+    END FOR
+
+    mismatch_count = LENGTH(details_json)
+    completed_at = current_time()
+    DATABASE.INSERT reconciliation_runs {
+        run_id: generate_uuid(),
+        started_at: started_at,
+        completed_at: completed_at,
+        checked_value_count: checked_value_count,
+        mismatch_count: mismatch_count,
+        details_json: details_json
+    }
+
+    # Mismatches show drift only. NEVER INSERT audit_events and NEVER overwrite
+    # audit_events or current_values: neither actor nor occurrence time is proven.
+    # This operation only reads GitHub; the prototype has no Project write access.
+    RETURN HTTP 200 {
+        checked_value_count: checked_value_count,
+        mismatch_count: mismatch_count,
+        details_json: details_json
+    }
+END ROUTINE

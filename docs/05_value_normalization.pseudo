@@ -1,0 +1,90 @@
+# Canonical Project field-value normalization
+
+TYPE NormalizationResult =
+    {outcome: "supported", previous_value: JSON, current_value: JSON}
+    OR {outcome: "unsupported", error: human-readable text, debugger_route: text}
+
+ROUTINE normalize(previousRaw, currentRaw, field_type, option_metadata) -> NormalizationResult
+    previous = normalize_one(previousRaw, field_type, option_metadata)
+    current = normalize_one(currentRaw, field_type, option_metadata)
+
+    IF previous.outcome == "unsupported" OR current.outcome == "unsupported"
+        # Caller retains webhook_deliveries evidence, marks processing_status
+        # "failed", and substitutes the actual delivery ID in this protected route.
+        RETURN {
+            outcome: "unsupported",
+            error: join_human_errors(previous.error, current.error),
+            debugger_route: "GET /internal/deliveries/:id"
+        }
+    END IF
+
+    # These keys plug directly into section 7's canonical audit event:
+    # "previous_value" and "current_value".
+    RETURN {
+        outcome: "supported",
+        previous_value: previous.value,
+        current_value: current.value
+    }
+END ROUTINE
+
+ROUTINE normalize_one(raw, field_type, option_metadata) -> one-value result
+    IF raw is absent, cleared, or empty according to the field shape
+        # Explicit null means removed/empty and is rendered as visible "Cleared".
+        RETURN {outcome: "supported", value: explicit_null}
+    END IF
+
+    SWITCH field_type
+        CASE "single_select":
+            option_id = raw.option_id
+            label = raw.label OR option_metadata.label_for(option_id)
+            IF option_id IS unavailable OR label IS unavailable
+                RETURN unsupported("single_select requires available option_id and label; values were not invented")
+            END IF
+            RETURN {outcome: "supported", value: {option_id: option_id, label: label}}
+
+        CASE "text":
+            IF raw.text IS unavailable
+                RETURN unsupported("text value shape is unknown")
+            END IF
+            RETURN {outcome: "supported", value: {text: raw.text}}
+
+        CASE "number":
+            IF raw.number IS unavailable OR NOT finite_number(raw.number)
+                RETURN unsupported("number value shape is unknown")
+            END IF
+            RETURN {outcome: "supported", value: {number: raw.number}}
+
+        CASE "date":
+            IF raw.date IS unavailable OR NOT valid_ISO_date(raw.date)
+                RETURN unsupported("date value shape is unknown or not an ISO date")
+            END IF
+            RETURN {outcome: "supported", value: {date: raw.date}}
+
+        CASE "iteration":
+            iteration_id = raw.iteration_id
+            label = raw.label OR option_metadata.label_for(iteration_id)
+            IF iteration_id IS unavailable OR label IS unavailable
+                RETURN unsupported("iteration requires available iteration_id and label; values were not invented")
+            END IF
+            RETURN {outcome: "supported", value: {iteration_id: iteration_id, label: label}}
+
+        DEFAULT:
+            RETURN unsupported("Unsupported field_type or payload shape: " + explicit_value_or_unknown(field_type))
+    END SWITCH
+END ROUTINE
+
+ROUTINE unsupported(message) -> one-value result
+    RETURN {
+        outcome: "unsupported",
+        value: {unknown: true},
+        error: message + "; raw evidence remains in webhook_deliveries"
+    }
+END ROUTINE
+
+# Identity and event metadata are not value-normalizer outputs. The ingestion caller
+# must carry canonical event keys event_id, delivery_id, installation_id,
+# organization_login, project_node_id, project_item_node_id, content_type,
+# content_node_id, content_title, content_url, field_node_id, field_name, field_type,
+# actor_login, occurred_at, received_at, and source verbatim. If actor, timestamp,
+# title, label, option_id, or another value is unavailable, represent it explicitly
+# as null/unknown or return unsupported; NEVER invent it.

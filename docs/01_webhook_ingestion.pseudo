@@ -1,0 +1,158 @@
+# Webhook ingestion
+
+CONSTANT ROUTE = "POST /api/github/webhooks"
+CONSTANT SIGNATURE_HEADER = "X-Hub-Signature-256"
+CONSTANT DELIVERY_HEADER = "X-GitHub-Delivery"
+CONSTANT EVENT_HEADER = "X-GitHub-Event"
+
+ROUTINE receive_github_webhook(request) -> HTTP response
+    # Read bytes before any parsing: signature validation and retained evidence use the
+    # UNMODIFIED raw body.
+    raw_body = request.read_unmodified_raw_body()
+    supplied_signature = request.header(SIGNATURE_HEADER)
+
+    IF supplied_signature IS missing OR
+       NOT constant_time_equal(
+           supplied_signature,
+           "sha256=" + HMAC_SHA256(ENV.GITHUB_WEBHOOK_SECRET, raw_body)
+       )
+        # An unauthenticated request is not accepted as evidence.
+        RETURN HTTP 401
+    END IF
+
+    delivery_id = request.header(DELIVERY_HEADER)
+    event_name = request.header(EVENT_HEADER)
+    received_at = current_time()
+
+    IF delivery_id IS missing OR event_name IS missing
+        # No row can satisfy the required delivery_id key. Reject explicitly rather
+        # than inventing identity or pretending that the request was processed.
+        RETURN HTTP 400 {error: "Missing X-GitHub-Delivery or X-GitHub-Event"}
+    END IF
+
+    # Insert raw evidence BEFORE parsing or normalization. The database enforces the
+    # primary-key/unique constraint on webhook_deliveries.delivery_id.
+    insert_result = DATABASE.INSERT webhook_deliveries {
+        delivery_id: delivery_id,
+        event_name: event_name,
+        action: explicit_null,
+        headers_json: serialize_all_headers(request.headers),
+        payload_json: raw_body,
+        received_at: received_at,
+        # The model permits only processed/ignored/failed. Until atomic processing
+        # succeeds, failed is the conservative visible outcome after a crash.
+        processing_status: "failed",
+        processing_error: "Raw delivery stored; processing not yet completed"
+    } ON UNIQUE CONFLICT delivery_id RETURN "duplicate"
+
+    IF insert_result == "duplicate"
+        # Redelivery succeeds but is processed AT MOST ONCE and creates no event.
+        RETURN HTTP 200 {delivery_id: delivery_id, duplicate: true}
+    END IF
+
+    # Durable commit is required before interpretation. A crash from here onward
+    # leaves recoverable raw evidence rather than silently losing the delivery.
+    DATABASE.COMMIT
+
+    TRY
+        payload = parse_json(raw_body)
+        extracted = extract_delivery_fields(payload, event_name)
+        # extracted contains exact canonical inputs when available:
+        # action, installation_id, organization_login, project_node_id,
+        # project_item_node_id, content_type, content_node_id, content_title,
+        # content_url, field_node_id, field_name, field_type, actor_login,
+        # occurred_at, sender, previousRaw, currentRaw, and change data.
+        DATABASE.UPDATE webhook_deliveries
+            SET action = extracted.action
+            WHERE delivery_id = delivery_id
+    CATCH error
+        mark_delivery_failed(delivery_id,
+            "Signed payload could not be parsed or required delivery data extracted: " + human_message(error))
+        RETURN HTTP 200 {delivery_id: delivery_id, processing_status: "failed"}
+    END TRY
+
+    IF event_name != "projects_v2_item" OR
+       NOT supported_action(extracted.action) OR
+       extracted.project_node_id != ENV.TARGET_PROJECT_NODE_ID
+        DATABASE.UPDATE webhook_deliveries
+            SET processing_status = "ignored", processing_error = explicit_null
+            WHERE delivery_id = delivery_id
+        RETURN HTTP 200 {delivery_id: delivery_id, processing_status: "ignored"}
+    END IF
+
+    normalization = 05_value_normalization.normalize(
+        extracted.previousRaw,
+        extracted.currentRaw,
+        extracted.field_type,
+        extracted.option_metadata
+    )
+
+    IF normalization.outcome == "unsupported"
+        # FR-12: retain evidence and expose an actionable debugger reference.
+        mark_delivery_failed(delivery_id,
+            normalization.error + "; inspect GET /internal/deliveries/" + delivery_id)
+        RETURN HTTP 200 {delivery_id: delivery_id, processing_status: "failed"}
+    END IF
+
+    TRY
+        DATABASE.BEGIN TRANSACTION
+
+        # Canonical audit-event JSON keys (section 7), persisted append-only:
+        canonical_event = {
+            event_id: generate_uuid(),
+            delivery_id: delivery_id,
+            installation_id: extracted.installation_id,
+            organization_login: extracted.organization_login,
+            project_node_id: extracted.project_node_id,
+            project_item_node_id: extracted.project_item_node_id,
+            content_type: extracted.content_type,
+            content_node_id: extracted.content_node_id,
+            content_title: extracted.content_title,
+            content_url: extracted.content_url,
+            field_node_id: extracted.field_node_id,
+            field_name: extracted.field_name,
+            field_type: extracted.field_type,
+            previous_value: normalization.previous_value,
+            current_value: normalization.current_value,
+            actor_login: extracted.actor_login,
+            occurred_at: extracted.occurred_at,
+            received_at: received_at,
+            source: "github_webhook"
+        }
+        DATABASE.INSERT audit_events FROM canonical_event
+            MAP previous_value TO previous_value_json
+            MAP current_value TO current_value_json
+            SET created_at = current_time()
+
+        DATABASE.UPSERT current_values {
+            item_node_id: extracted.project_item_node_id,
+            field_node_id: extracted.field_node_id,
+            value_json: normalization.current_value,
+            observed_at: extracted.occurred_at,
+            source: "github_webhook"
+        } ON UNIQUE (item_node_id, field_node_id)
+
+        DATABASE.UPDATE webhook_deliveries
+            SET processing_status = "processed", processing_error = explicit_null
+            WHERE delivery_id = delivery_id
+
+        # Event insert + current-state upsert + processed status are ONE commit.
+        DATABASE.COMMIT TRANSACTION
+    CATCH error
+        DATABASE.ROLLBACK TRANSACTION
+        mark_delivery_failed(delivery_id, "Atomic event persistence failed: " + human_message(error))
+        RETURN HTTP 200 {delivery_id: delivery_id, processing_status: "failed"}
+    END TRY
+
+    RETURN HTTP 200 {delivery_id: delivery_id, processing_status: "processed"}
+END ROUTINE
+
+ROUTINE mark_delivery_failed(delivery_id, human_readable_error)
+    DATABASE.UPDATE webhook_deliveries
+        SET processing_status = "failed", processing_error = human_readable_error
+        WHERE delivery_id = delivery_id
+END ROUTINE
+
+# Integrity boundary: audit_events exposes INSERT and SELECT only. No application
+# routine or route may UPDATE or DELETE audit_events. The GitHub App requests only
+# organization Projects:read; this handler never invokes a GitHub mutation.
