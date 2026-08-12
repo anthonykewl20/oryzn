@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.0](https://github.com/anthonykewl20/oryzn/compare/v0.1.0...v0.2.0) (2026-08-12)
+
+
+### Features
+
+* **setup:** bootstrap Next.js app with shadcn design system, PostgreSQL, and /health ([#29](https://github.com/anthonykewl20/oryzn/issues/29)) ([dea2cf3](https://github.com/anthonykewl20/oryzn/commit/dea2cf399475d123dfba17cdfce8f9976b166a7a))
+* **webhook:** filter, normalize, and atomically persist field changes ([#33](https://github.com/anthonykewl20/oryzn/issues/33)) ([e6fa6c9](https://github.com/anthonykewl20/oryzn/commit/e6fa6c9907dc51f4006377bddc0793a6b9d54c02))
+* **webhook:** receive, verify, and store signed deliveries ([#32](https://github.com/anthonykewl20/oryzn/issues/32)) ([e5f43c4](https://github.com/anthonykewl20/oryzn/commit/e5f43c4886d448e5b573613136c197a94e668e94))
+
 ## 0.1.0 (2026-08-12)
 
 
