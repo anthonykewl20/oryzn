@@ -24,8 +24,6 @@ jobs:
           stale-pr-label: stale
           exempt-issue-labels: 'phase-2,security,pinned,stale-exempt,autorelease: pending'
           exempt-pr-labels: 'phase-2,security,pinned,stale-exempt,autorelease: pending'
-          exempt-all-issue-milestones: true
-          exempt-all-pr-milestones: true
           exempt-draft-pr: true
           operations-per-run: 30
           remove-stale-when-updated: true
