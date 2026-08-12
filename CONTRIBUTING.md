@@ -31,6 +31,15 @@ Reviewers may add the `docs-needed` label to require the documentation-updated p
 
 Never edit `CHANGELOG.md` manually. Release-please owns it, and CI blocks manual edits. Conventional commits flow into the changelog automatically. Merging `feat` or `fix` commits to `main` causes release-please to open a release PR; merging that PR creates the tag, GitHub Release, and `CHANGELOG.md` entry, and bumps `version.txt`. Oryzn does not publish an npm package.
 
+## Releases
+
+release-please opens a `chore(main): release X.Y.Z` pull request whenever `feat` or `fix` commits land on `main`. Merging that pull request creates the tag, the GitHub Release (marked prerelease while on 0.x), the `CHANGELOG.md` entry, and bumps `version.txt`. v0.1.0 was the first such release.
+
+Because branch protection requires the `commitlint` and `policy` checks and GitHub does not trigger workflows from events caused by the automatic `GITHUB_TOKEN`, a release PR opened with `GITHUB_TOKEN` cannot satisfy those checks on its own. To merge a release PR cleanly, choose one:
+
+1. **Recommended — use a PAT.** Create a fine-grained PAT scoped to this repository with Contents read/write and Pull requests read/write, add it as the `RELEASE_PLEASE_TOKEN` repository secret, and change the `token:` line in `.github/workflows/release-please.yml` to `${{ secrets.RELEASE_PLEASE_TOKEN }}`. Release PRs then open as the PAT user and trigger the gates normally.
+2. **Without a PAT — relax and restore.** Temporarily clear the required status check contexts on `main`, merge the release PR, then restore the `commitlint` and `policy` contexts.
+
 ## No double tracking
 
 GitHub Issues track detailed work. [`docs/ROADMAP.md`](docs/ROADMAP.md) is milestone-level only. Do not duplicate issue state in the roadmap.
