@@ -134,6 +134,29 @@ The build sequence begins by creating a GitHub App with callback and webhook URL
 
 Implementation and deployment commands will land with the application. Until then, the [full MVP specification](docs/GitHub_Projects_Audit_History_MVP_Spec.md) is the source of truth.
 
+## Getting started
+
+### Prerequisites
+
+- Node.js 20 or newer
+- PostgreSQL 16 or newer
+
+Install dependencies and create your local environment file:
+
+```sh
+npm install
+cp .env.example .env.local
+```
+
+Fill in the values in `.env.local`, then initialize the database and start the app:
+
+```sh
+npm run migrate
+npm run dev
+```
+
+Visit `GET /api/health` to check application and database liveness. The GitHub App, its installation, and the target Project node ID are created manually on GitHub as part of [issue #2](https://github.com/anthonykewl20/oryzn/issues/2).
+
 ## Roadmap: earn rollback
 
 Rollback work may begin only when:
