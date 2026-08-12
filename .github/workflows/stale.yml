@@ -31,8 +31,8 @@ jobs:
           stale-issue-message: >
             This issue has had no activity for 30 days and is marked stale.
             Comment with the current status or next step, or remove the stale
-            label. It will close in 14 days if it remains inactive. Issues in a
-            milestone or labelled phase-2, security, or pinned are exempt.
+            label. It will close in 14 days if it remains inactive. Issues
+            labelled phase-2, security, pinned, or stale-exempt are exempt.
           stale-pr-message: >
             This pull request has had no activity for 45 days and is marked stale.
             Comment with the current status or next step, or remove the stale

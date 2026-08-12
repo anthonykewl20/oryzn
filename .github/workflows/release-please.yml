@@ -18,5 +18,5 @@ jobs:
         with:
           # Uses the automatic GITHUB_TOKEN. To let the release PR trigger downstream CI, create a fine-grained PAT (Contents R/W, Pull requests R/W) and add it as the RELEASE_PLEASE_TOKEN secret, then switch this to ${{ secrets.RELEASE_PLEASE_TOKEN }}.
           token: ${{ secrets.GITHUB_TOKEN }}
-          release-type: simple
-          include-component-in-tag: false
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
