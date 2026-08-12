@@ -22,7 +22,7 @@ jobs:
           node-version: '22'
       - name: Skip release-please PR
         if: ${{ contains(github.event.pull_request.labels.*.name, 'autorelease: pending') }}
-        run: echo "Release-please PR; skipping commitlint."
+        run: 'echo "Release-please PR; skipping commitlint."'
       - if: ${{ !contains(github.event.pull_request.labels.*.name, 'autorelease: pending') }}
         run: npm ci
       - if: ${{ !contains(github.event.pull_request.labels.*.name, 'autorelease: pending') }}
