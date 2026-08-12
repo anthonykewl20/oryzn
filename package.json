@@ -1,0 +1,13 @@
+{
+  "name": "oryzn",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Trustworthy, immutable audit history for GitHub Projects.",
+  "scripts": {
+    "commitlint": "commitlint --from=HEAD~1 --to=HEAD"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^19.5.0",
+    "@commitlint/config-conventional": "^19.5.0"
+  }
+}
