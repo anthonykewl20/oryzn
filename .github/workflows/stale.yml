@@ -22,8 +22,8 @@ jobs:
           days-before-pr-close: 14
           stale-issue-label: stale
           stale-pr-label: stale
-          exempt-issue-labels: phase-2,security,pinned,stale-exempt,autorelease: pending
-          exempt-pr-labels: phase-2,security,pinned,stale-exempt,autorelease: pending
+          exempt-issue-labels: 'phase-2,security,pinned,stale-exempt,autorelease: pending'
+          exempt-pr-labels: 'phase-2,security,pinned,stale-exempt,autorelease: pending'
           exempt-all-issue-milestones: true
           exempt-all-pr-milestones: true
           exempt-draft-pr: true
