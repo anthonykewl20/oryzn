@@ -21,14 +21,14 @@ jobs:
         with:
           node-version: '22'
       - name: Skip release-please PR
-        if: ${{ contains(github.event.pull_request.labels.*.name, 'autorelease: pending') }}
+        if: "${{ contains(github.event.pull_request.labels.*.name, 'autorelease: pending') }}"
         run: 'echo "Release-please PR; skipping commitlint."'
-      - if: ${{ !contains(github.event.pull_request.labels.*.name, 'autorelease: pending') }}
+      - if: "${{ !contains(github.event.pull_request.labels.*.name, 'autorelease: pending') }}"
         run: npm ci
-      - if: ${{ !contains(github.event.pull_request.labels.*.name, 'autorelease: pending') }}
+      - if: "${{ !contains(github.event.pull_request.labels.*.name, 'autorelease: pending') }}"
         name: Lint PR commits
         run: npx --no-install commitlint --from "${{ github.event.pull_request.base.sha }}" --to "${{ github.event.pull_request.head.sha }}" --verbose
-      - if: ${{ !contains(github.event.pull_request.labels.*.name, 'autorelease: pending') }}
+      - if: "${{ !contains(github.event.pull_request.labels.*.name, 'autorelease: pending') }}"
         name: Lint PR title
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
