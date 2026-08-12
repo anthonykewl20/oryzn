@@ -157,6 +157,10 @@ npm run dev
 
 Visit `GET /api/health` to check application and database liveness. The GitHub App, its installation, and the target Project node ID are created manually on GitHub as part of [issue #2](https://github.com/anthonykewl20/oryzn/issues/2).
 
+## UI & design system
+
+The app uses shadcn/ui with Tailwind CSS. [DESIGN.md](DESIGN.md) defines Oryzn's visual system, including semantic color and audit-data typography. [AGENTS.md](AGENTS.md) is the binding guide for AI agents: use shadcn components and do not hand-roll UI.
+
 ## Roadmap: earn rollback
 
 Rollback work may begin only when:
