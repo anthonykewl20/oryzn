@@ -37,7 +37,7 @@ GitHub Issues track detailed work. [`docs/ROADMAP.md`](docs/ROADMAP.md) is miles
 
 ## Stale policy
 
-The stale bot marks inactive issues after 30 days and inactive pull requests after 45 days, then closes them 14 days later. Because every issue is required to have a milestone and all milestoned items are exempt, the bot in practice closes only untriaged issues without a milestone and stale pull requests. Triaged work stays open. Exempt labels are `phase-2`, `security`, `pinned`, and `stale-exempt`.
+The stale bot flags all inactive issues after 30 days and inactive pull requests after 45 days, then closes them 14 days later, regardless of milestone. Exempt labels are `phase-2`, `security`, `pinned`, and `stale-exempt` (and `autorelease: pending` for pull requests). Add the `stale-exempt` label to intentionally-parked work you do not want auto-closed.
 
 ## Phase-2 gate
 
